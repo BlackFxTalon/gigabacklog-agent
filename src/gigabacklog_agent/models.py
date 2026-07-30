@@ -21,6 +21,23 @@ class Recommendation:
 
 
 @dataclass(frozen=True, slots=True)
+class SimilarRequest:
+    """A historical request returned as context for a specialist."""
+
+    id: int
+    title: str
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class SearchToolCall:
+    """The only tool call the model may request in this processing slice."""
+
+    name: str
+    query: str
+
+
+@dataclass(frozen=True, slots=True)
 class SessionResult:
     """Observable outcome of one completed processing session."""
 
