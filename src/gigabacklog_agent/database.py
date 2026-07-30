@@ -8,10 +8,16 @@ from dataclasses import asdict
 from pathlib import Path
 
 from gigabacklog_agent.models import (
+    AnalysisStatus,
+    Impact,
     Recommendation,
+    RecommendedPriority,
+    RequestCategory,
     SessionResult,
     SimilarRequest,
     SpecialistDecision,
+    TerminalStatus,
+    Workaround,
 )
 
 _WORD_PATTERN = re.compile(r"[\w]+", re.UNICODE)
@@ -58,12 +64,14 @@ class SQLiteRunStore:
                 CREATE TABLE IF NOT EXISTS agent_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     raw_request TEXT NOT NULL,
-                    recommendation_json TEXT NOT NULL,
+                    recommendation_json TEXT,
                     review_status TEXT NOT NULL,
+                    terminal_status TEXT NOT NULL DEFAULT 'completed',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            self._migrate_agent_runs(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS historical_requests (
@@ -74,6 +82,41 @@ class SQLiteRunStore:
                 )
                 """
             )
+
+    @staticmethod
+    def _migrate_agent_runs(connection: sqlite3.Connection) -> None:
+        columns = {
+            row[1]: {"not_null": bool(row[3])}
+            for row in connection.execute("PRAGMA table_info(agent_runs)")
+        }
+        if "terminal_status" in columns and not columns["recommendation_json"]["not_null"]:
+            return
+
+        terminal_status = "terminal_status" if "terminal_status" in columns else "'completed'"
+        connection.execute(
+            """
+            CREATE TABLE agent_runs_migrated (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_request TEXT NOT NULL,
+                recommendation_json TEXT,
+                review_status TEXT NOT NULL,
+                terminal_status TEXT NOT NULL DEFAULT 'completed',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO agent_runs_migrated (
+                id, raw_request, recommendation_json, review_status, terminal_status, created_at
+            )
+            SELECT
+                id, raw_request, recommendation_json, review_status, {terminal_status}, created_at
+            FROM agent_runs
+            """
+        )
+        connection.execute("DROP TABLE agent_runs")
+        connection.execute("ALTER TABLE agent_runs_migrated RENAME TO agent_runs")
 
     @staticmethod
     def _normalize_text(value: str) -> str:
@@ -125,17 +168,24 @@ class SQLiteRunStore:
     def save_run(
         self,
         raw_request: str,
-        recommendation: Recommendation,
+        recommendation: Recommendation | None,
         review_status: SpecialistDecision,
+        terminal_status: TerminalStatus,
     ) -> int:
-        recommendation_json = json.dumps(asdict(recommendation), ensure_ascii=False)
+        recommendation_json = (
+            json.dumps(asdict(recommendation), ensure_ascii=False)
+            if recommendation is not None
+            else None
+        )
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
                 """
-                INSERT INTO agent_runs (raw_request, recommendation_json, review_status)
-                VALUES (?, ?, ?)
+                INSERT INTO agent_runs (
+                    raw_request, recommendation_json, review_status, terminal_status
+                )
+                VALUES (?, ?, ?, ?)
                 """,
-                (raw_request, recommendation_json, review_status.value),
+                (raw_request, recommendation_json, review_status.value, terminal_status.value),
             )
             if cursor.lastrowid is None:
                 raise RuntimeError("SQLite did not return a run identifier")
@@ -145,7 +195,7 @@ class SQLiteRunStore:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 """
-                SELECT raw_request, recommendation_json, review_status
+                SELECT raw_request, recommendation_json, review_status, terminal_status
                 FROM agent_runs
                 WHERE id = ?
                 """,
@@ -155,10 +205,28 @@ class SQLiteRunStore:
         if row is None:
             return None
 
-        raw_request, recommendation_json, review_status = row
+        raw_request, recommendation_json, review_status, terminal_status = row
+        recommendation = None
+        if recommendation_json is not None:
+            payload = json.loads(recommendation_json)
+            if set(payload) == {"title", "summary"}:
+                payload |= {
+                    "category": RequestCategory.OTHER,
+                    "priority": RecommendedPriority.P4,
+                    "reason": "Legacy recommendation without structured analysis.",
+                    "affected_users": "unknown",
+                    "impact": Impact.UNKNOWN,
+                    "workaround": Workaround.UNKNOWN,
+                    "analysis_status": AnalysisStatus.NEEDS_INFORMATION,
+                    "missing_information": ["Structured analysis was not recorded."],
+                    "recommended_action": "Review the original request.",
+                    "similar_request_ids": [],
+                }
+            recommendation = Recommendation(**payload)
         return SessionResult(
             raw_request=raw_request,
-            recommendation=Recommendation(**json.loads(recommendation_json)),
+            recommendation=recommendation,
             review_status=SpecialistDecision(review_status),
+            terminal_status=TerminalStatus(terminal_status),
             run_id=run_id,
         )

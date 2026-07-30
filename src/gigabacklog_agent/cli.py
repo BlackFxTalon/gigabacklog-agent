@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from gigabacklog_agent.application import ProcessingSession
 from gigabacklog_agent.database import SQLiteRunStore
@@ -12,6 +12,7 @@ from gigabacklog_agent.models import (
     SessionResult,
     SimilarRequest,
     SpecialistDecision,
+    TerminalStatus,
 )
 
 
@@ -25,8 +26,35 @@ class OfflineFakeGigaChat:
         self,
         raw_request: str,
         similar_requests: list[SimilarRequest],
-    ) -> Recommendation:
-        return Recommendation(title="Предварительный анализ обращения", summary=raw_request)
+    ) -> dict[str, Any]:
+        return self._payload(raw_request, similar_requests)
+
+    def correct_recommendation(
+        self,
+        raw_request: str,
+        similar_requests: list[SimilarRequest],
+        validation_error: str,
+        allowed_similar_request_ids: set[int],
+        response_schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._payload(raw_request, similar_requests)
+
+    @staticmethod
+    def _payload(raw_request: str, similar_requests: list[SimilarRequest]) -> dict[str, Any]:
+        return {
+            "title": "Предварительный анализ обращения",
+            "summary": raw_request,
+            "category": "other",
+            "priority": "P3",
+            "reason": "Нужна проверка специалистом.",
+            "affected_users": "unknown",
+            "impact": "unknown",
+            "workaround": "unknown",
+            "analysis_status": "needs_information",
+            "missing_information": ["Уточнить количество затронутых пользователей."],
+            "recommended_action": "Проверить обращение.",
+            "similar_request_ids": [request.id for request in similar_requests],
+        }
 
 
 def run_cli(
@@ -50,6 +78,20 @@ def run_cli(
         output_stream.write("Рекомендация агента:\n")
         output_stream.write(f"Заголовок: {recommendation.title}\n")
         output_stream.write(f"Резюме: {recommendation.summary}\n\n")
+        output_stream.write(f"Категория: {recommendation.category.value}\n")
+        output_stream.write(f"Приоритет: {recommendation.priority.value}\n")
+        output_stream.write(f"Обоснование: {recommendation.reason}\n")
+        output_stream.write(f"Затронутые пользователи: {recommendation.affected_users}\n")
+        output_stream.write(f"Влияние: {recommendation.impact.value}\n")
+        output_stream.write(f"Обходной путь: {recommendation.workaround.value}\n")
+        output_stream.write(f"Рекомендуемое действие: {recommendation.recommended_action}\n")
+        similar_ids = ", ".join(map(str, recommendation.similar_request_ids)) or "нет"
+        output_stream.write(f"Похожие обращения: {similar_ids}\n\n")
+        if recommendation.analysis_status.value == "needs_information":
+            output_stream.write("Недостающая информация:\n")
+            for item in recommendation.missing_information:
+                output_stream.write(f"- {item}\n")
+            output_stream.write("\n")
         output_stream.write("Решение специалиста:\n1. Принять рекомендацию\n> ")
         output_stream.flush()
         if input_stream.readline().strip() != "1":
@@ -58,6 +100,13 @@ def run_cli(
         return SpecialistDecision.ACCEPTED
 
     result = session.run(raw_request, request_review, show_tool_result)
+    if result.terminal_status is TerminalStatus.VALIDATION_FAILED:
+        output_stream.write(
+            "Не удалось сформировать валидированную рекомендацию. "
+            "Обращение сохранено без решения специалиста.\n"
+        )
+        return result
+
     output_stream.write(f"Решение сохранено. Run ID: {result.run_id}\n")
     return result
 
@@ -65,4 +114,6 @@ def run_cli(
 def main() -> None:
     store = SQLiteRunStore(Path("data") / "prototype.db")
     session = ProcessingSession(model=OfflineFakeGigaChat(), run_store=store)
-    run_cli(session, input_stream=sys.stdin, output_stream=sys.stdout)
+    result = run_cli(session, input_stream=sys.stdin, output_stream=sys.stdout)
+    if result.terminal_status is TerminalStatus.VALIDATION_FAILED:
+        raise SystemExit(1)

@@ -10,6 +10,7 @@ readme = "IDEA.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "langgraph==1.2.10",
+    "pydantic>=2.13,<3",
     "typing-extensions>=4.16,<5",
 ]
 
