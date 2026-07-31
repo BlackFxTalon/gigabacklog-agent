@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
@@ -9,10 +9,13 @@ from typing_extensions import TypedDict
 from gigabacklog_agent.database import SQLiteRunStore
 from gigabacklog_agent.models import (
     Recommendation,
+    RequestAnalysis,
     SearchToolCall,
     SessionResult,
     SimilarRequest,
     SpecialistDecision,
+    TerminalStatus,
+    validate_request_analysis,
 )
 
 
@@ -25,15 +28,25 @@ class RecommendationModel(Protocol):
         self,
         raw_request: str,
         similar_requests: list[SimilarRequest],
-    ) -> Recommendation: ...
+    ) -> dict[str, Any]: ...
+
+    def correct_recommendation(
+        self,
+        raw_request: str,
+        similar_requests: list[SimilarRequest],
+        validation_error: str,
+        allowed_similar_request_ids: set[int],
+        response_schema: dict[str, Any],
+    ) -> dict[str, Any]: ...
 
 
 class SessionState(TypedDict, total=False):
     raw_request: str
     search_call: SearchToolCall
     similar_requests: list[SimilarRequest]
-    recommendation: Recommendation
+    recommendation: Recommendation | None
     review_status: SpecialistDecision
+    terminal_status: TerminalStatus
     run_id: int
 
 
@@ -75,14 +88,49 @@ class ProcessingSession:
             return {"similar_requests": similar_requests}
 
         def recommend(state: SessionState) -> SessionState:
-            return {
-                "recommendation": self._model.recommend(
-                    state["raw_request"], state["similar_requests"]
-                )
-            }
+            allowed_ids = {request.id for request in state["similar_requests"]}
+            payload = self._model.recommend(state["raw_request"], state["similar_requests"])
+            for attempt in range(2):
+                try:
+                    analysis: RequestAnalysis = validate_request_analysis(payload, allowed_ids)
+                    return {
+                        "recommendation": Recommendation(
+                            title=analysis.title,
+                            summary=analysis.summary,
+                            category=analysis.category,
+                            priority=analysis.priority,
+                            reason=analysis.reason,
+                            affected_users=analysis.affected_users,
+                            impact=analysis.impact,
+                            workaround=analysis.workaround,
+                            analysis_status=analysis.analysis_status,
+                            missing_information=analysis.missing_information,
+                            recommended_action=analysis.recommended_action,
+                            similar_request_ids=analysis.similar_request_ids,
+                        ),
+                        "terminal_status": TerminalStatus.COMPLETED,
+                    }
+                except (ValueError, TypeError) as error:
+                    if attempt == 1:
+                        return {
+                            "recommendation": None,
+                            "review_status": SpecialistDecision.NOT_REVIEWED,
+                            "terminal_status": TerminalStatus.VALIDATION_FAILED,
+                        }
+                    payload = self._model.correct_recommendation(
+                        state["raw_request"],
+                        state["similar_requests"],
+                        str(error),
+                        allowed_ids,
+                        RequestAnalysis.model_json_schema(),
+                    )
+            raise AssertionError("Validation retry loop must return")
 
         def review(state: SessionState) -> SessionState:
-            return {"review_status": review_decision_provider(state["recommendation"])}
+            recommendation = state["recommendation"]
+            if recommendation is None:
+                raise AssertionError("A validation failure must bypass human review")
+            return {"review_status": review_decision_provider(recommendation)}
 
         def persist(state: SessionState) -> SessionState:
             return {
@@ -90,8 +138,14 @@ class ProcessingSession:
                     raw_request=state["raw_request"],
                     recommendation=state["recommendation"],
                     review_status=state["review_status"],
+                    terminal_status=state["terminal_status"],
                 )
             }
+
+        def next_after_recommendation(state: SessionState) -> str:
+            if state["terminal_status"] is TerminalStatus.VALIDATION_FAILED:
+                return "persist"
+            return "review"
 
         graph.add_node("request_search", request_search)
         graph.add_node("search", search)
@@ -101,7 +155,7 @@ class ProcessingSession:
         graph.add_edge(START, "request_search")
         graph.add_edge("request_search", "search")
         graph.add_edge("search", "recommend")
-        graph.add_edge("recommend", "review")
+        graph.add_conditional_edges("recommend", next_after_recommendation)
         graph.add_edge("review", "persist")
         graph.add_edge("persist", END)
 
@@ -111,5 +165,6 @@ class ProcessingSession:
             raw_request=final_state["raw_request"],
             recommendation=final_state["recommendation"],
             review_status=final_state["review_status"],
+            terminal_status=final_state["terminal_status"],
             run_id=final_state["run_id"],
         )

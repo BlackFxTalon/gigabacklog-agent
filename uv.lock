@@ -79,6 +79,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "langgraph" },
+    { name = "pydantic" },
     { name = "typing-extensions" },
 ]
 
@@ -91,6 +92,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "langgraph", specifier = "==1.2.10" },
+    { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "typing-extensions", specifier = ">=4.16,<5" },
 ]
 
