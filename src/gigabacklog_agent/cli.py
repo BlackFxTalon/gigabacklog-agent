@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, TextIO
@@ -8,10 +9,12 @@ from gigabacklog_agent.application import ProcessingSession
 from gigabacklog_agent.database import SQLiteRunStore
 from gigabacklog_agent.models import (
     Recommendation,
+    RunEvent,
     SearchToolCall,
     SessionResult,
     SimilarRequest,
     SpecialistDecision,
+    SpecialistReview,
     TerminalStatus,
 )
 
@@ -69,12 +72,16 @@ def run_cli(
     output_stream.write("\n")
 
     def show_tool_result(tool_call: SearchToolCall, similar_requests: list[SimilarRequest]) -> None:
-        output_stream.write(f"[tool] {tool_call.name}(query={tool_call.query!r})\n")
+        output_stream.write(f"[tool] {tool_call.name}\n")
         output_stream.write(f"[tool] Найдено похожих обращений: {len(similar_requests)}\n")
         for request in similar_requests:
             output_stream.write(f"[tool] #{request.id}: {request.title}\n")
 
-    def request_review(recommendation: Recommendation) -> SpecialistDecision:
+    def show_event(event: RunEvent) -> None:
+        payload = json.dumps(event.payload, ensure_ascii=False, sort_keys=True)
+        output_stream.write(f"[event {event.sequence}] {event.event_type} {payload}\n")
+
+    def request_review(recommendation: Recommendation) -> SpecialistReview:
         output_stream.write("Рекомендация агента:\n")
         output_stream.write(f"Заголовок: {recommendation.title}\n")
         output_stream.write(f"Резюме: {recommendation.summary}\n\n")
@@ -92,14 +99,34 @@ def run_cli(
             for item in recommendation.missing_information:
                 output_stream.write(f"- {item}\n")
             output_stream.write("\n")
-        output_stream.write("Решение специалиста:\n1. Принять рекомендацию\n> ")
+        output_stream.write(
+            "Решение специалиста:\n"
+            "1. Принять рекомендацию\n"
+            "2. Отклонить рекомендацию\n"
+            "3. Не рассматривать сейчас\n> "
+        )
         output_stream.flush()
-        if input_stream.readline().strip() != "1":
-            raise ValueError("The offline walking skeleton only supports acceptance")
-        output_stream.write("\n")
-        return SpecialistDecision.ACCEPTED
+        choice = input_stream.readline().strip()
+        if choice == "1":
+            output_stream.write("\n")
+            return SpecialistReview(SpecialistDecision.ACCEPTED)
+        if choice == "2":
+            output_stream.write("Комментарий к отклонению:\n> ")
+            output_stream.flush()
+            comment = input_stream.readline().strip()
+            output_stream.write("\n")
+            return SpecialistReview(SpecialistDecision.REJECTED, comment)
+        if choice == "3":
+            output_stream.write("\n")
+            return SpecialistReview(SpecialistDecision.NOT_REVIEWED)
+        raise ValueError("Unknown specialist review decision")
 
-    result = session.run(raw_request, request_review, show_tool_result)
+    result = session.run(
+        raw_request,
+        request_review,
+        tool_observer=show_tool_result,
+        event_observer=show_event,
+    )
     if result.terminal_status is TerminalStatus.VALIDATION_FAILED:
         output_stream.write(
             "Не удалось сформировать валидированную рекомендацию. "

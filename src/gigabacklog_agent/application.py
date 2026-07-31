@@ -10,10 +10,12 @@ from gigabacklog_agent.database import SQLiteRunStore
 from gigabacklog_agent.models import (
     Recommendation,
     RequestAnalysis,
+    RunEvent,
     SearchToolCall,
     SessionResult,
     SimilarRequest,
     SpecialistDecision,
+    SpecialistReview,
     TerminalStatus,
     validate_request_analysis,
 )
@@ -45,13 +47,14 @@ class SessionState(TypedDict, total=False):
     search_call: SearchToolCall
     similar_requests: list[SimilarRequest]
     recommendation: Recommendation | None
-    review_status: SpecialistDecision
+    review: SpecialistReview
     terminal_status: TerminalStatus
     run_id: int
 
 
-ReviewDecisionProvider = Callable[[Recommendation], SpecialistDecision]
+ReviewDecisionProvider = Callable[[Recommendation], SpecialistReview]
 ToolObserver = Callable[[SearchToolCall, list[SimilarRequest]], None]
+EventObserver = Callable[[RunEvent], None]
 
 
 class ProcessingSession:
@@ -66,7 +69,16 @@ class ProcessingSession:
         raw_request: str,
         review_decision_provider: ReviewDecisionProvider,
         tool_observer: ToolObserver | None = None,
+        event_observer: EventObserver | None = None,
     ) -> SessionResult:
+        events: list[RunEvent] = []
+
+        def emit(event_type: str, payload: dict[str, object]) -> None:
+            event = RunEvent(sequence=len(events) + 1, event_type=event_type, payload=payload)
+            events.append(event)
+            if event_observer is not None:
+                event_observer(event)
+
         raw_request = raw_request.strip()
         if not raw_request:
             raise ValueError("Request must not be empty")
@@ -77,22 +89,36 @@ class ProcessingSession:
             for _ in range(2):
                 tool_call = self._model.create_search_tool_call(state["raw_request"])
                 if tool_call.name == "search_similar_requests" and tool_call.query.strip():
+                    emit(
+                        "model_stage",
+                        {"stage": "search_tool_call", "outcome": "tool_call_requested"},
+                    )
                     return {"search_call": tool_call}
             raise ValueError("Model did not produce a valid search tool call")
 
         def search(state: SessionState) -> SessionState:
             tool_call = state["search_call"]
+            emit("tool_input", {"tool_name": tool_call.name})
             similar_requests = self._run_store.search_similar_requests(tool_call.query)
+            emit(
+                "tool_output",
+                {
+                    "similar_request_count": len(similar_requests),
+                    "similar_request_ids": [request.id for request in similar_requests],
+                },
+            )
             if tool_observer is not None:
                 tool_observer(tool_call, similar_requests)
             return {"similar_requests": similar_requests}
 
         def recommend(state: SessionState) -> SessionState:
             allowed_ids = {request.id for request in state["similar_requests"]}
+            emit("model_stage", {"stage": "recommendation", "outcome": "response_received"})
             payload = self._model.recommend(state["raw_request"], state["similar_requests"])
             for attempt in range(2):
                 try:
                     analysis: RequestAnalysis = validate_request_analysis(payload, allowed_ids)
+                    emit("validation", {"attempt": attempt + 1, "outcome": "passed"})
                     return {
                         "recommendation": Recommendation(
                             title=analysis.title,
@@ -110,17 +136,22 @@ class ProcessingSession:
                         ),
                         "terminal_status": TerminalStatus.COMPLETED,
                     }
-                except (ValueError, TypeError) as error:
+                except (ValueError, TypeError):
+                    emit("validation", {"attempt": attempt + 1, "outcome": "failed"})
                     if attempt == 1:
                         return {
                             "recommendation": None,
-                            "review_status": SpecialistDecision.NOT_REVIEWED,
+                            "review": SpecialistReview(SpecialistDecision.NOT_REVIEWED),
                             "terminal_status": TerminalStatus.VALIDATION_FAILED,
                         }
+                    emit(
+                        "model_stage",
+                        {"stage": "recommendation_correction", "outcome": "response_requested"},
+                    )
                     payload = self._model.correct_recommendation(
                         state["raw_request"],
                         state["similar_requests"],
-                        str(error),
+                        "Recommendation did not match the required schema.",
                         allowed_ids,
                         RequestAnalysis.model_json_schema(),
                     )
@@ -130,15 +161,25 @@ class ProcessingSession:
             recommendation = state["recommendation"]
             if recommendation is None:
                 raise AssertionError("A validation failure must bypass human review")
-            return {"review_status": review_decision_provider(recommendation)}
+            return {"review": review_decision_provider(recommendation)}
 
         def persist(state: SessionState) -> SessionState:
+            review = state["review"]
+            emit(
+                "review",
+                {
+                    "decision": review.decision.value,
+                    "comment_recorded": bool((review.comment or "").strip()),
+                },
+            )
             return {
                 "run_id": self._run_store.save_run(
                     raw_request=state["raw_request"],
                     recommendation=state["recommendation"],
-                    review_status=state["review_status"],
+                    review_status=review.decision,
+                    review_comment=review.comment,
                     terminal_status=state["terminal_status"],
+                    events=events,
                 )
             }
 
@@ -164,7 +205,8 @@ class ProcessingSession:
         return SessionResult(
             raw_request=final_state["raw_request"],
             recommendation=final_state["recommendation"],
-            review_status=final_state["review_status"],
+            review_status=final_state["review"].decision,
+            review_comment=final_state["review"].comment,
             terminal_status=final_state["terminal_status"],
             run_id=final_state["run_id"],
         )

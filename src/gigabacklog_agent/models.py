@@ -15,6 +15,18 @@ class SpecialistDecision(StrEnum):
     NOT_REVIEWED = "not_reviewed"
 
 
+@dataclass(frozen=True, slots=True)
+class SpecialistReview:
+    """A specialist's explicit decision and optional review comment."""
+
+    decision: SpecialistDecision
+    comment: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.decision is SpecialistDecision.REJECTED and not (self.comment or "").strip():
+            raise ValueError("Rejected review requires a comment")
+
+
 class TerminalStatus(StrEnum):
     """Terminal outcome recorded for every processing session."""
 
@@ -131,11 +143,21 @@ class SearchToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class RunEvent:
+    """One safe, ordered fact observed while processing a run."""
+
+    sequence: int
+    event_type: str
+    payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class SessionResult:
     """Observable outcome of one completed processing session."""
 
     raw_request: str
     recommendation: Recommendation | None
     review_status: SpecialistDecision
+    review_comment: str | None
     terminal_status: TerminalStatus
     run_id: int

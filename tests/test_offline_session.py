@@ -13,6 +13,7 @@ from gigabacklog_agent.models import (
     SearchToolCall,
     SimilarRequest,
     SpecialistDecision,
+    SpecialistReview,
     TerminalStatus,
 )
 
@@ -120,7 +121,7 @@ def test_specialist_can_accept_and_persist_an_offline_recommendation(tmp_path) -
     assert store.get_run(result.run_id) == result
     database_path.rename(tmp_path / "released.db")
     output = terminal_output.getvalue()
-    assert "[tool] search_similar_requests(" in output
+    assert "[tool] search_similar_requests\n" in output
     assert "[tool] Найдено похожих обращений: 3" in output
     assert "[tool] #1: Сбой входа отдела продаж после обновления" in output
     assert "Заголовок: Не работает авторизация" in output
@@ -142,13 +143,44 @@ def test_empty_request_is_rejected_before_the_graph_runs(tmp_path) -> None:
     assert model.requests == []
 
 
+@pytest.mark.parametrize(
+    ("specialist_input", "decision", "comment"),
+    [
+        (
+            "2\nНужна проверка владельцем сервиса.\n",
+            SpecialistDecision.REJECTED,
+            "Нужна проверка владельцем сервиса.",
+        ),
+        ("3\n", SpecialistDecision.NOT_REVIEWED, None),
+    ],
+)
+def test_cli_persists_each_specialist_review_outcome(
+    tmp_path,
+    specialist_input: str,
+    decision: SpecialistDecision,
+    comment: str | None,
+) -> None:
+    store = SQLiteRunStore(tmp_path / "prototype.db")
+    session = ProcessingSession(model=FakeGigaChat(), run_store=store)
+
+    result = run_cli(
+        session,
+        input_stream=StringIO(f"Обращение для проверки.\n{specialist_input}"),
+        output_stream=StringIO(),
+    )
+
+    assert result.review_status is decision
+    assert result.review_comment == comment
+    assert store.get_run(result.run_id) == result
+
+
 def test_first_invalid_analysis_is_corrected_once_before_review(tmp_path) -> None:
     model = CorrectingFakeGigaChat()
     session = ProcessingSession(model=model, run_store=SQLiteRunStore(tmp_path / "prototype.db"))
 
     result = session.run(
         "Отдел продаж не может войти после обновления.",
-        lambda _: SpecialistDecision.ACCEPTED,
+        lambda _: SpecialistReview(SpecialistDecision.ACCEPTED),
     )
 
     assert model.corrections == 1
@@ -160,7 +192,7 @@ def test_second_invalid_analysis_persists_a_terminal_result_without_human_review
     store = SQLiteRunStore(tmp_path / "prototype.db")
     session = ProcessingSession(model=model, run_store=store)
 
-    def fail_review(_: Recommendation) -> SpecialistDecision:
+    def fail_review(_: Recommendation) -> SpecialistReview:
         raise AssertionError("Human review must not start after validation failure")
 
     result = session.run("Отдел продаж не может войти после обновления.", fail_review)
@@ -190,3 +222,89 @@ def test_cli_reports_a_validation_failure_without_showing_a_recommendation(tmp_p
     assert result.recommendation is None
     assert "Рекомендация агента:" not in terminal_output.getvalue()
     assert "Не удалось сформировать валидированную рекомендацию" in terminal_output.getvalue()
+
+
+def test_processing_session_persists_ordered_safe_events_for_a_completed_run(tmp_path) -> None:
+    store = SQLiteRunStore(tmp_path / "prototype.db")
+    session = ProcessingSession(model=FakeGigaChat(), run_store=store)
+    raw_request = "Пароль token=do-not-log для отдела продаж не работает."
+
+    result = session.run(
+        raw_request,
+        lambda _: SpecialistReview(SpecialistDecision.REJECTED, "Нужна проверка владельцем."),
+    )
+
+    events = store.get_run_events(result.run_id)
+
+    assert store.get_run(result.run_id) == result
+    assert result.review_comment == "Нужна проверка владельцем."
+    assert [event.event_type for event in events] == [
+        "model_stage",
+        "tool_input",
+        "tool_output",
+        "model_stage",
+        "validation",
+        "review",
+    ]
+    assert [event.sequence for event in events] == [1, 2, 3, 4, 5, 6]
+    assert events[-1].payload == {
+        "decision": "rejected",
+        "comment_recorded": True,
+    }
+    assert events[2].payload == {
+        "similar_request_count": 2,
+        "similar_request_ids": [1, 2],
+    }
+    persisted_payload = [event.payload for event in events]
+    assert raw_request not in str(persisted_payload)
+    assert "do-not-log" not in str(persisted_payload)
+
+
+def test_processing_session_persists_validation_failure_events_without_review(tmp_path) -> None:
+    store = SQLiteRunStore(tmp_path / "prototype.db")
+    session = ProcessingSession(model=InvalidFakeGigaChat(), run_store=store)
+
+    result = session.run(
+        "Отдел продаж не может войти после обновления.",
+        lambda _: (_ for _ in ()).throw(AssertionError("review must not be called")),
+    )
+
+    events = store.get_run_events(result.run_id)
+
+    assert result.terminal_status is TerminalStatus.VALIDATION_FAILED
+    assert [event.event_type for event in events] == [
+        "model_stage",
+        "tool_input",
+        "tool_output",
+        "model_stage",
+        "validation",
+        "model_stage",
+        "validation",
+        "review",
+    ]
+    assert events[-1].payload == {
+        "decision": "not_reviewed",
+        "comment_recorded": False,
+    }
+
+
+def test_cli_emits_a_safe_event_trace(tmp_path) -> None:
+    session = ProcessingSession(
+        model=FakeGigaChat(),
+        run_store=SQLiteRunStore(tmp_path / "prototype.db"),
+    )
+    raw_request = "Пароль token=do-not-log для отдела продаж не работает."
+    terminal_output = StringIO()
+
+    run_cli(
+        session,
+        input_stream=StringIO(f"{raw_request}\n1\n"),
+        output_stream=terminal_output,
+    )
+
+    output = terminal_output.getvalue()
+    event_trace = "\n".join(line for line in output.splitlines() if line.startswith("[event"))
+    assert "[event 1] model_stage" in event_trace
+    assert "[event 6] review" in event_trace
+    assert raw_request not in event_trace
+    assert "do-not-log" not in event_trace
