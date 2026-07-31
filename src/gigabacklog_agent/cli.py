@@ -8,6 +8,7 @@ from typing import Any, TextIO
 from gigabacklog_agent.application import ProcessingSession
 from gigabacklog_agent.database import SQLiteRunStore
 from gigabacklog_agent.models import (
+    ModelContext,
     Recommendation,
     RunEvent,
     SearchToolCall,
@@ -25,22 +26,23 @@ class OfflineFakeGigaChat:
     def create_search_tool_call(self, raw_request: str) -> SearchToolCall:
         return SearchToolCall(name="search_similar_requests", query=raw_request)
 
-    def recommend(
-        self,
-        raw_request: str,
-        similar_requests: list[SimilarRequest],
-    ) -> dict[str, Any]:
-        return self._payload(raw_request, similar_requests)
+    def recommend(self, context: ModelContext) -> dict[str, Any]:
+        return self._payload(
+            context.untrusted_request,
+            list(context.untrusted_similar_requests),
+        )
 
     def correct_recommendation(
         self,
-        raw_request: str,
-        similar_requests: list[SimilarRequest],
+        context: ModelContext,
         validation_error: str,
         allowed_similar_request_ids: set[int],
         response_schema: dict[str, Any],
     ) -> dict[str, Any]:
-        return self._payload(raw_request, similar_requests)
+        return self._payload(
+            context.untrusted_request,
+            list(context.untrusted_similar_requests),
+        )
 
     @staticmethod
     def _payload(raw_request: str, similar_requests: list[SimilarRequest]) -> dict[str, Any]:
@@ -127,10 +129,11 @@ def run_cli(
         tool_observer=show_tool_result,
         event_observer=show_event,
     )
-    if result.terminal_status is TerminalStatus.VALIDATION_FAILED:
+    if result.terminal_status is not TerminalStatus.COMPLETED:
         output_stream.write(
-            "Не удалось сформировать валидированную рекомендацию. "
-            "Обращение сохранено без решения специалиста.\n"
+            "Не удалось завершить обработку обращения. "
+            "Обращение сохранено без решения специалиста. "
+            f"Run ID: {result.run_id}\n"
         )
         return result
 
@@ -142,5 +145,5 @@ def main() -> None:
     store = SQLiteRunStore(Path("data") / "prototype.db")
     session = ProcessingSession(model=OfflineFakeGigaChat(), run_store=store)
     result = run_cli(session, input_stream=sys.stdin, output_stream=sys.stdout)
-    if result.terminal_status is TerminalStatus.VALIDATION_FAILED:
+    if result.terminal_status is not TerminalStatus.COMPLETED:
         raise SystemExit(1)

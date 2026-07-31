@@ -8,6 +8,7 @@ from typing_extensions import TypedDict
 
 from gigabacklog_agent.database import SQLiteRunStore
 from gigabacklog_agent.models import (
+    ModelContext,
     Recommendation,
     RequestAnalysis,
     RunEvent,
@@ -26,16 +27,11 @@ class RecommendationModel(Protocol):
 
     def create_search_tool_call(self, raw_request: str) -> SearchToolCall: ...
 
-    def recommend(
-        self,
-        raw_request: str,
-        similar_requests: list[SimilarRequest],
-    ) -> dict[str, Any]: ...
+    def recommend(self, context: ModelContext) -> dict[str, Any]: ...
 
     def correct_recommendation(
         self,
-        raw_request: str,
-        similar_requests: list[SimilarRequest],
+        context: ModelContext,
         validation_error: str,
         allowed_similar_request_ids: set[int],
         response_schema: dict[str, Any],
@@ -82,24 +78,47 @@ class ProcessingSession:
         raw_request = raw_request.strip()
         if not raw_request:
             raise ValueError("Request must not be empty")
+        if len(raw_request) > 4000:
+            raise ValueError("Длина обращения не должна превышать 4 000 символов")
 
         graph = StateGraph(SessionState)  # ty: ignore[invalid-argument-type]
 
         def request_search(state: SessionState) -> SessionState:
-            for _ in range(2):
-                tool_call = self._model.create_search_tool_call(state["raw_request"])
+            for attempt in range(2):
+                try:
+                    tool_call = self._model.create_search_tool_call(state["raw_request"])
+                except Exception:
+                    emit("model_failure", {"stage": "search_tool_call", "outcome": "failed"})
+                    return {
+                        "recommendation": None,
+                        "review": SpecialistReview(SpecialistDecision.NOT_REVIEWED),
+                        "terminal_status": TerminalStatus.MODEL_FAILED,
+                    }
                 if tool_call.name == "search_similar_requests" and tool_call.query.strip():
                     emit(
                         "model_stage",
                         {"stage": "search_tool_call", "outcome": "tool_call_requested"},
                     )
                     return {"search_call": tool_call}
-            raise ValueError("Model did not produce a valid search tool call")
+                emit("model_protocol", {"attempt": attempt + 1, "outcome": "failed"})
+            return {
+                "recommendation": None,
+                "review": SpecialistReview(SpecialistDecision.NOT_REVIEWED),
+                "terminal_status": TerminalStatus.MODEL_PROTOCOL_FAILED,
+            }
 
         def search(state: SessionState) -> SessionState:
             tool_call = state["search_call"]
             emit("tool_input", {"tool_name": tool_call.name})
-            similar_requests = self._run_store.search_similar_requests(tool_call.query)
+            try:
+                similar_requests = self._run_store.search_similar_requests(tool_call.query)
+            except Exception:
+                emit("tool_failure", {"tool_name": tool_call.name, "outcome": "failed"})
+                return {
+                    "recommendation": None,
+                    "review": SpecialistReview(SpecialistDecision.NOT_REVIEWED),
+                    "terminal_status": TerminalStatus.TOOL_FAILED,
+                }
             emit(
                 "tool_output",
                 {
@@ -113,8 +132,19 @@ class ProcessingSession:
 
         def recommend(state: SessionState) -> SessionState:
             allowed_ids = {request.id for request in state["similar_requests"]}
-            emit("model_stage", {"stage": "recommendation", "outcome": "response_received"})
-            payload = self._model.recommend(state["raw_request"], state["similar_requests"])
+            emit("model_stage", {"stage": "recommendation", "outcome": "response_requested"})
+            try:
+                context = ModelContext.from_untrusted_inputs(
+                    state["raw_request"], state["similar_requests"]
+                )
+                payload = self._model.recommend(context)
+            except Exception:
+                emit("model_failure", {"stage": "recommendation", "outcome": "failed"})
+                return {
+                    "recommendation": None,
+                    "review": SpecialistReview(SpecialistDecision.NOT_REVIEWED),
+                    "terminal_status": TerminalStatus.MODEL_FAILED,
+                }
             for attempt in range(2):
                 try:
                     analysis: RequestAnalysis = validate_request_analysis(payload, allowed_ids)
@@ -148,13 +178,23 @@ class ProcessingSession:
                         "model_stage",
                         {"stage": "recommendation_correction", "outcome": "response_requested"},
                     )
-                    payload = self._model.correct_recommendation(
-                        state["raw_request"],
-                        state["similar_requests"],
-                        "Recommendation did not match the required schema.",
-                        allowed_ids,
-                        RequestAnalysis.model_json_schema(),
-                    )
+                    try:
+                        payload = self._model.correct_recommendation(
+                            context,
+                            "Recommendation did not match the required schema.",
+                            allowed_ids,
+                            RequestAnalysis.model_json_schema(),
+                        )
+                    except Exception:
+                        emit(
+                            "model_failure",
+                            {"stage": "recommendation_correction", "outcome": "failed"},
+                        )
+                        return {
+                            "recommendation": None,
+                            "review": SpecialistReview(SpecialistDecision.NOT_REVIEWED),
+                            "terminal_status": TerminalStatus.MODEL_FAILED,
+                        }
             raise AssertionError("Validation retry loop must return")
 
         def review(state: SessionState) -> SessionState:
@@ -183,10 +223,26 @@ class ProcessingSession:
                 )
             }
 
+        def next_after_search(state: SessionState) -> str:
+            if state.get("terminal_status") is TerminalStatus.TOOL_FAILED:
+                return "persist"
+            return "recommend"
+
         def next_after_recommendation(state: SessionState) -> str:
-            if state["terminal_status"] is TerminalStatus.VALIDATION_FAILED:
+            if state["terminal_status"] in {
+                TerminalStatus.VALIDATION_FAILED,
+                TerminalStatus.MODEL_FAILED,
+            }:
                 return "persist"
             return "review"
+
+        def next_after_request_search(state: SessionState) -> str:
+            if state.get("terminal_status") in {
+                TerminalStatus.MODEL_PROTOCOL_FAILED,
+                TerminalStatus.MODEL_FAILED,
+            }:
+                return "persist"
+            return "search"
 
         graph.add_node("request_search", request_search)
         graph.add_node("search", search)
@@ -194,8 +250,8 @@ class ProcessingSession:
         graph.add_node("review", review)
         graph.add_node("persist", persist)
         graph.add_edge(START, "request_search")
-        graph.add_edge("request_search", "search")
-        graph.add_edge("search", "recommend")
+        graph.add_conditional_edges("request_search", next_after_request_search)
+        graph.add_conditional_edges("search", next_after_search)
         graph.add_conditional_edges("recommend", next_after_recommendation)
         graph.add_edge("review", "persist")
         graph.add_edge("persist", END)
