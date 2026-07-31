@@ -13,6 +13,7 @@ from gigabacklog_agent.models import (
     Recommendation,
     RecommendedPriority,
     RequestCategory,
+    RunEvent,
     SessionResult,
     SimilarRequest,
     SpecialistDecision,
@@ -66,12 +67,26 @@ class SQLiteRunStore:
                     raw_request TEXT NOT NULL,
                     recommendation_json TEXT,
                     review_status TEXT NOT NULL,
+                    review_comment TEXT,
                     terminal_status TEXT NOT NULL DEFAULT 'completed',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
             self._migrate_agent_runs(connection)
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_events (
+                    run_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (run_id, sequence),
+                    FOREIGN KEY (run_id) REFERENCES agent_runs(id)
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS historical_requests (
@@ -89,6 +104,9 @@ class SQLiteRunStore:
             row[1]: {"not_null": bool(row[3])}
             for row in connection.execute("PRAGMA table_info(agent_runs)")
         }
+        if "review_comment" not in columns:
+            connection.execute("ALTER TABLE agent_runs ADD COLUMN review_comment TEXT")
+            columns["review_comment"] = {"not_null": False}
         if "terminal_status" in columns and not columns["recommendation_json"]["not_null"]:
             return
 
@@ -100,6 +118,7 @@ class SQLiteRunStore:
                 raw_request TEXT NOT NULL,
                 recommendation_json TEXT,
                 review_status TEXT NOT NULL,
+                review_comment TEXT,
                 terminal_status TEXT NOT NULL DEFAULT 'completed',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -108,10 +127,12 @@ class SQLiteRunStore:
         connection.execute(
             f"""
             INSERT INTO agent_runs_migrated (
-                id, raw_request, recommendation_json, review_status, terminal_status, created_at
+                id, raw_request, recommendation_json, review_status,
+                review_comment, terminal_status, created_at
             )
             SELECT
-                id, raw_request, recommendation_json, review_status, {terminal_status}, created_at
+                id, raw_request, recommendation_json, review_status,
+                NULL, {terminal_status}, created_at
             FROM agent_runs
             """
         )
@@ -171,6 +192,8 @@ class SQLiteRunStore:
         recommendation: Recommendation | None,
         review_status: SpecialistDecision,
         terminal_status: TerminalStatus,
+        review_comment: str | None = None,
+        events: list[RunEvent] | None = None,
     ) -> int:
         recommendation_json = (
             json.dumps(asdict(recommendation), ensure_ascii=False)
@@ -181,21 +204,61 @@ class SQLiteRunStore:
             cursor = connection.execute(
                 """
                 INSERT INTO agent_runs (
-                    raw_request, recommendation_json, review_status, terminal_status
+                    raw_request, recommendation_json, review_status, review_comment, terminal_status
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (raw_request, recommendation_json, review_status.value, terminal_status.value),
+                (
+                    raw_request,
+                    recommendation_json,
+                    review_status.value,
+                    review_comment,
+                    terminal_status.value,
+                ),
             )
             if cursor.lastrowid is None:
                 raise RuntimeError("SQLite did not return a run identifier")
-            return cursor.lastrowid
+            run_id = cursor.lastrowid
+            connection.executemany(
+                """
+                INSERT INTO run_events (run_id, sequence, event_type, payload_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        event.sequence,
+                        event.event_type,
+                        json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
+                    )
+                    for event in events or []
+                ],
+            )
+            return run_id
+
+    def get_run_events(self, run_id: int) -> list[RunEvent]:
+        """Return a run's safe audit events in their recorded sequence."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT sequence, event_type, payload_json
+                FROM run_events
+                WHERE run_id = ?
+                ORDER BY sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            RunEvent(sequence=sequence, event_type=event_type, payload=json.loads(payload_json))
+            for sequence, event_type, payload_json in rows
+        ]
 
     def get_run(self, run_id: int) -> SessionResult | None:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 """
-                SELECT raw_request, recommendation_json, review_status, terminal_status
+                SELECT raw_request, recommendation_json, review_status,
+                       review_comment, terminal_status
                 FROM agent_runs
                 WHERE id = ?
                 """,
@@ -205,7 +268,7 @@ class SQLiteRunStore:
         if row is None:
             return None
 
-        raw_request, recommendation_json, review_status, terminal_status = row
+        raw_request, recommendation_json, review_status, review_comment, terminal_status = row
         recommendation = None
         if recommendation_json is not None:
             payload = json.loads(recommendation_json)
@@ -227,6 +290,7 @@ class SQLiteRunStore:
             raw_request=raw_request,
             recommendation=recommendation,
             review_status=SpecialistDecision(review_status),
+            review_comment=review_comment,
             terminal_status=TerminalStatus(terminal_status),
             run_id=run_id,
         )
