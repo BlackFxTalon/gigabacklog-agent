@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, TextIO
 
 from gigabacklog_agent.application import ProcessingSession
 from gigabacklog_agent.database import SQLiteRunStore
+from gigabacklog_agent.gigachat_config import GigaChatConfigurationError
+from gigabacklog_agent.live import create_live_processing_session
 from gigabacklog_agent.models import (
     ModelContext,
     Recommendation,
@@ -135,6 +138,11 @@ def run_cli(
             "Обращение сохранено без решения специалиста. "
             f"Run ID: {result.run_id}\n"
         )
+        if result.terminal_status is TerminalStatus.MODEL_FAILED:
+            output_stream.write(
+                "Если ошибка связана с сертификатом GigaChat, используйте официальную "
+                "инструкцию: https://developers.sber.ru/docs/ru/gigachat/certificates\n"
+            )
         return result
 
     output_stream.write(f"Решение сохранено. Run ID: {result.run_id}\n")
@@ -143,7 +151,14 @@ def run_cli(
 
 def main() -> None:
     store = SQLiteRunStore(Path("data") / "prototype.db")
-    session = ProcessingSession(model=OfflineFakeGigaChat(), run_store=store)
+    if os.environ.get("GIGACHAT_LIVE") == "1":
+        try:
+            session = create_live_processing_session(store)
+        except GigaChatConfigurationError as error:
+            sys.stderr.write(f"Не удалось настроить GigaChat: {error}\n")
+            raise SystemExit(1) from None
+    else:
+        session = ProcessingSession(model=OfflineFakeGigaChat(), run_store=store)
     result = run_cli(session, input_stream=sys.stdin, output_stream=sys.stdout)
     if result.terminal_status is not TerminalStatus.COMPLETED:
         raise SystemExit(1)
