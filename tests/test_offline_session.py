@@ -371,6 +371,23 @@ def test_cli_reports_a_validation_failure_without_showing_a_recommendation(tmp_p
     assert "Run ID: 1" in terminal_output.getvalue()
 
 
+def test_cli_model_failure_shows_safe_certificate_guidance(tmp_path) -> None:
+    session = ProcessingSession(
+        model=UnavailableModelFakeGigaChat(),
+        run_store=SQLiteRunStore(tmp_path / "prototype.db"),
+    )
+    terminal_output = StringIO()
+
+    result = run_cli(
+        session,
+        input_stream=StringIO("Отдел продаж не может войти после обновления.\n"),
+        output_stream=terminal_output,
+    )
+
+    assert result.terminal_status is TerminalStatus.MODEL_FAILED
+    assert "developers.sber.ru/docs/ru/gigachat/certificates" in terminal_output.getvalue()
+
+
 def test_processing_session_persists_ordered_safe_events_for_a_completed_run(tmp_path) -> None:
     store = SQLiteRunStore(tmp_path / "prototype.db")
     session = ProcessingSession(model=FakeGigaChat(), run_store=store)

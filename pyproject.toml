@@ -9,6 +9,8 @@ description = "A controlled GigaChat agent for initial service-request processin
 readme = "IDEA.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "gigachat==0.2.1",
+    "langchain-gigachat==0.5.1",
     "langgraph==1.2.10",
     "pydantic>=2.13,<3",
     "typing-extensions>=4.16,<5",
@@ -29,6 +31,9 @@ packages = ["src/gigabacklog_agent"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+markers = [
+    "integration: opt-in tests that call the live GigaChat API",
+]
 
 [tool.ruff]
 target-version = "py311"

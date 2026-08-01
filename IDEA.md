@@ -460,6 +460,33 @@ https://api.giga.chat
 
 Предпочтительный вариант работы с SSL — установка сертификатов НУЦ Минцифры согласно официальной документации. Отключение проверки SSL не должно попадать в публичную версию проекта.
 
+Отключение проверки TLS не поддерживается: в live mode адаптер всегда использует системное trust store или указанный CA bundle.
+
+### Live mode
+
+По умолчанию CLI работает с детерминированным offline adapter и не обращается к внешним API. Для явного запуска официального GigaChat adapter нужны:
+
+```bash
+export GIGACHAT_LIVE=1
+export GIGACHAT_CREDENTIALS="<authorization-key>"
+export GIGACHAT_MODEL="GigaChat-2-Max" # optional override
+export GIGACHAT_CA_BUNDLE_FILE="/path/to/russian-root-ca.pem" # optional
+uv run gigabacklog
+```
+
+Используется scope `GIGACHAT_API_PERS`. Проверка TLS всегда включена; переменной или флага для её отключения нет. Adapter принудительно вызывает только `search_similar_requests`, а final output требует native strict JSON Schema и проходит независимую Pydantic/provenance validation.
+
+### Opt-in live smoke test
+
+Обычный suite не выполняет внешние вызовы. Для отдельного live contract smoke test нужны credentials и явный opt-in:
+
+```bash
+RUN_GIGACHAT_INTEGRATION=1 GIGACHAT_CREDENTIALS="<authorization-key>" \
+  uv run pytest -m integration -q
+```
+
+---
+
 Официальная документация:
 
 - [GigaChat API](https://developers.sber.ru/docs/ru/gigachat/guides/main)
