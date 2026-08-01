@@ -49,6 +49,22 @@ class OfflineFakeGigaChat:
 
     @staticmethod
     def _payload(raw_request: str, similar_requests: list[SimilarRequest]) -> dict[str, Any]:
+        normalized_request = raw_request.casefold()
+        if "не может войти" in normalized_request and "отдел" in normalized_request:
+            return {
+                "title": "Сбой авторизации после обновления",
+                "summary": raw_request,
+                "category": "incident",
+                "priority": "P1",
+                "reason": "Сбой блокирует работу целого подразделения.",
+                "affected_users": "department",
+                "impact": "blocked",
+                "workaround": "unavailable",
+                "analysis_status": "complete",
+                "missing_information": [],
+                "recommended_action": "Проверить сервис авторизации и последние изменения.",
+                "similar_request_ids": [request.id for request in similar_requests],
+            }
         return {
             "title": "Предварительный анализ обращения",
             "summary": raw_request,
