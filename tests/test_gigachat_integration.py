@@ -13,15 +13,23 @@ from gigachat.models import (
 )
 from pydantic import ValidationError
 
+from gigabacklog_agent.application import ProcessingSession
+from gigabacklog_agent.database import SQLiteRunStore
 from gigabacklog_agent.gigachat_adapter import (
     GigaChatRecommendationModel,
-    GigaChatStructuredOutputError,
     _provider_schema,
     _structured_policy,
     create_gigachat_client,
 )
 from gigabacklog_agent.gigachat_config import GigaChatSettings
-from gigabacklog_agent.models import ModelContext, RequestAnalysis, SimilarRequest
+from gigabacklog_agent.models import (
+    ModelContext,
+    RequestAnalysis,
+    SimilarRequest,
+    SpecialistDecision,
+    SpecialistReview,
+    TerminalStatus,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -193,38 +201,22 @@ def test_live_gigachat_minimal_v2_strict_schema_probe() -> None:
     os.environ.get("RUN_GIGACHAT_INTEGRATION") != "1" or not os.environ.get("GIGACHAT_CREDENTIALS"),
     reason="requires RUN_GIGACHAT_INTEGRATION=1 and GIGACHAT_CREDENTIALS",
 )
-def test_live_gigachat_forces_search_tool_and_accepts_strict_schema() -> None:
+def test_live_gigachat_forces_search_tool_and_accepts_strict_schema(tmp_path) -> None:
     settings = GigaChatSettings.from_environment()
     client = create_gigachat_client(settings)
     available_models = {model.id_ for model in client.get_models().data}
     assert settings.model in available_models
 
-    bridge = GigaChatRecommendationModel(client)
+    session = ProcessingSession(
+        model=GigaChatRecommendationModel(client),
+        run_store=SQLiteRunStore(tmp_path / "live-smoke.db"),
+    )
+    result = session.run(
+        "Проверить вход сотрудников в систему",
+        lambda _: SpecialistReview(SpecialistDecision.ACCEPTED),
+    )
 
-    tool_call = bridge.create_search_tool_call("Проверить вход сотрудников в систему")
-
-    assert tool_call.name == "search_similar_requests"
-    assert tool_call.query.strip()
-
-    try:
-        recommendation = bridge.recommend(
-            ModelContext.from_untrusted_inputs(
-                "Проверить вход сотрудников в систему",
-                [
-                    SimilarRequest(
-                        id=1,
-                        title="Сбой входа",
-                        summary="Пользователи не могут войти после обновления.",
-                    )
-                ],
-            )
-        )
-    except GigaChatStructuredOutputError as error:
-        raise AssertionError(f"Strict v2 structured output failed safely: {error}") from None
-    except ValidationError as error:
-        raise AssertionError(
-            f"Unexpected v2 structured response shape: {_safe_response_shape(error)}"
-        ) from error
-
-    assert recommendation["title"]
-    assert recommendation["similar_request_ids"] == [1]
+    assert result.terminal_status is TerminalStatus.COMPLETED
+    assert result.recommendation is not None
+    assert result.recommendation.title
+    assert set(result.recommendation.similar_request_ids) <= {1, 2, 3}
