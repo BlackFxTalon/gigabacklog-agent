@@ -80,6 +80,42 @@ GigaBacklog Agent — offline prototype
 Принятие рекомендации не вызывает внешнего действия: это только зафиксированное решение
 специалиста.
 
+## Что оказалось сложным
+
+### Legacy bridge не дал строгий контракт
+
+Первая версия live adapter опиралась на `langchain-gigachat`. Базовая связность, поиск и
+получение текста работали, но полный `RequestAnalysis` не получалось надёжно получить как
+валидный строгий JSON. Для такого CLI это принципиально: нельзя показывать специалисту
+частичную рекомендацию или незаметно перейти на prose fallback.
+
+Решение — убрать transitional LangChain bridge из provider boundary и перейти на прямой
+официальный GigaChat v2 SDK. Пока подходящий PyPI-релиз не закрывал нужный контракт, SDK
+закреплён на immutable official Git SHA в `pyproject.toml` и `uv.lock`. Финальный smoke на
+`GigaChat-2-Max` проверяет не минимальный JSON пример, а полный путь: forced named search,
+strict schema и локальную валидацию `RequestAnalysis`.
+
+### Schema можно сломать собственной «совместимостью»
+
+Pydantic schema содержит служебные `title` annotations. Для provider payload adapter удалял
+такие metadata-поля и разворачивал локальные `$ref`. В этой трансформации нашлась неприятная
+ошибка: рекурсивное правило удаляло и настоящее required свойство `properties.title`.
+Получалась противоречивая schema: поле было в `required`, но отсутствовало в `properties`.
+
+Исправление не стало «попробуем ещё раз»: schema test теперь проверяет provider-facing
+payload и отдельно гарантирует сохранение `properties.title` вместе с `minLength`. Именно
+после этого исправления full live smoke стал корректным доказательством контракта.
+
+### Offline и live тесты доказывают разное
+
+В CI нет credentials и внешних API. Это сознательная граница: unit, integration around
+SQLite и CLI, typecheck, formatter, lock и build запускаются offline. Реальный GigaChat smoke
+требует явного opt-in, credentials и проверяемого CA bundle; TLS verification не отключается.
+
+Отдельные диагностические probes помогли не смешать проблемы policy, message shape и полной
+schema. Но они не заменяют acceptance test: проект считает контракт подтверждённым только
+после полного forced-search сценария с `GigaChat-2-Max`.
+
 ## Quality gate
 
 Эта последовательность соответствует GitHub Actions и не вызывает внешние API:
