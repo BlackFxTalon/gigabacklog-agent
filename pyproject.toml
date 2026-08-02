@@ -9,8 +9,7 @@ description = "A controlled GigaChat agent for initial service-request processin
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "gigachat==0.2.1",
-    "langchain-gigachat==0.5.1",
+    "gigachat @ git+https://github.com/ai-forever/gigachat.git@0b694b35d017763086a4a72e2609479e1cdee687",
     "langgraph==1.2.10",
     "pydantic>=2.13,<3",
     "typing-extensions>=4.16,<5",
@@ -27,6 +26,9 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gigabacklog_agent"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 addopts = "-ra"

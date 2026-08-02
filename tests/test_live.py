@@ -4,14 +4,33 @@ from typing import Any
 
 from gigabacklog_agent.database import SQLiteRunStore
 from gigabacklog_agent.live import create_live_processing_session
+from gigabacklog_agent.models import RequestAnalysis
+
+
+class NonNetworkChat:
+    def create(self, payload: Any) -> Any:
+        raise AssertionError("Model invocation must not happen during construction")
+
+    def parse(
+        self,
+        payload: Any,
+        *,
+        response_format: type[RequestAnalysis],
+        strict: bool,
+    ) -> Any:
+        raise AssertionError("Model invocation must not happen during construction")
+
+    def stream(self, payload: Any) -> Any:
+        raise AssertionError("Model invocation must not happen during construction")
 
 
 class NonNetworkClient:
-    def bind_tools(self, tools: list[dict[str, Any]], *, tool_choice: str) -> Any:
-        raise AssertionError("Model invocation must not happen during construction")
+    def __init__(self) -> None:
+        self._chat = NonNetworkChat()
 
-    def with_structured_output(self, schema: type, **kwargs: Any) -> Any:
-        raise AssertionError("Model invocation must not happen during construction")
+    @property
+    def chat(self) -> NonNetworkChat:
+        return self._chat
 
 
 def test_live_session_construction_is_opt_in_and_sends_no_request(tmp_path) -> None:

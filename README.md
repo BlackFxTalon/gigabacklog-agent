@@ -100,9 +100,9 @@ RUN_GIGACHAT_INTEGRATION=1 GIGACHAT_CREDENTIALS="<authorization-key>" uv run pyt
 
 Никогда не коммитьте `.env`, authorization key или локальную SQLite-базу.
 
-## Почему `langchain-gigachat` и upstream LangGraph
+## GigaChat v2 и upstream LangGraph
 
-Интеграция использует официальный [`gigachat`](https://pypi.org/project/gigachat/) SDK и [`langchain-gigachat`](https://github.com/ai-forever/langchain-gigachat) adapter, а orchestration — явный upstream [`langgraph`](https://langchain-ai.github.io/langgraph/) `StateGraph`. Deprecated GigaChain/GigaGraph packages и prebuilt `create_react_agent` не используются.
+Production adapter использует официальный GigaChat v2 SDK: `client.chat.create()` для принудительного именованного function call и для JSON Schema через `ChatResponseFormat(..., strict=True)`. До публикации совместимого PyPI-релиза SDK закреплён по immutable official Git SHA; причина и правила замены описаны в [ADR-0003](docs/adr/0003-pinned-gigachat-v2-sdk-source.md). Полный live-контракт `RequestAnalysis` пока заблокирован поведением provider и отслеживается в [upstream issue #122](https://github.com/ai-forever/gigachat/issues/122); free-form fallback не используется. Orchestration остаётся явным upstream [`langgraph`](https://langchain-ai.github.io/langgraph/) `StateGraph`; `langchain-gigachat`, deprecated GigaChain/GigaGraph packages и prebuilt `create_react_agent` не используются.
 
 ## License
 

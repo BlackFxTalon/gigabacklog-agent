@@ -30,6 +30,7 @@ def test_official_adapter_factory_forces_tls_and_disables_any_fallback(tmp_path)
 
     assert result is not None
     assert factory.kwargs == {
+        "base_url": "https://api.giga.chat/v1",
         "credentials": "not-a-real-key",
         "scope": "GIGACHAT_API_PERS",
         "model": "GigaChat-2-Max",
@@ -37,5 +38,4 @@ def test_official_adapter_factory_forces_tls_and_disables_any_fallback(tmp_path)
         "ca_bundle_file": str(ca_bundle),
         "max_retries": 2,
         "retry_backoff_factor": 0.5,
-        "allow_any_tool_choice_fallback": False,
     }
