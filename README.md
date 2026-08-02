@@ -40,20 +40,45 @@ uv run gigabacklog
 
 Затем выберите `1`, чтобы принять рекомендацию. Offline adapter детерминирован и предназначен для демонстрации workflow без внешнего API.
 
-### Пример CLI-сессии
+### Демо-сценарий для интервью
+
+После `seed_database.py --reset` запустите `uv run gigabacklog`, вставьте каноническое
+обращение и выберите `1`. Это offline-сценарий: он не требует credentials и не вызывает
+внешний API.
 
 ```text
+GigaBacklog Agent — offline prototype
+
+Опишите проблему:
+> После обновления весь отдел продаж не может войти в систему заявок.
+
 [tool] search_similar_requests
-[tool] Найдено похожих обращений: 1
+[tool] Найдено похожих обращений: 3
+[tool] #1: Сбой входа отдела продаж после обновления
+[tool] #2: Не открывается система заявок у нескольких сотрудников
+[tool] #3: Запрос доступа новому сотруднику
+...
 Рекомендация агента:
+Заголовок: Сбой авторизации после обновления
 Категория: incident
 Приоритет: P1
 Затронутые пользователи: department
+Влияние: blocked
+Похожие обращения: 1, 2, 3
+
 Решение специалиста:
 1. Принять рекомендацию
-...
+2. Отклонить рекомендацию
+3. Не рассматривать сейчас
+> 1
+
 Решение сохранено. Run ID: 1
 ```
+
+В SQLite сохраняются рекомендация, выбранный специалистом статус и упорядоченный audit
+из шести безопасных событий: две model stages, tool input/output, validation и review.
+Принятие рекомендации не вызывает внешнего действия: это только зафиксированное решение
+специалиста.
 
 ## Quality gate
 
@@ -102,7 +127,7 @@ RUN_GIGACHAT_INTEGRATION=1 GIGACHAT_CREDENTIALS="<authorization-key>" uv run pyt
 
 ## GigaChat v2 и upstream LangGraph
 
-Production adapter использует официальный GigaChat v2 SDK: `client.chat.create()` для принудительного именованного function call и для JSON Schema через `ChatResponseFormat(..., strict=True)`. До публикации совместимого PyPI-релиза SDK закреплён по immutable official Git SHA; причина и правила замены описаны в [ADR-0003](docs/adr/0003-pinned-gigachat-v2-sdk-source.md). Полный live-контракт `RequestAnalysis` пока заблокирован поведением provider и отслеживается в [upstream issue #122](https://github.com/ai-forever/gigachat/issues/122); free-form fallback не используется. Orchestration остаётся явным upstream [`langgraph`](https://langchain-ai.github.io/langgraph/) `StateGraph`; `langchain-gigachat`, deprecated GigaChain/GigaGraph packages и prebuilt `create_react_agent` не используются.
+Production adapter использует официальный GigaChat v2 SDK: `client.chat.create()` для принудительного именованного function call и для JSON Schema через `ChatResponseFormat(..., strict=True)`. До публикации совместимого PyPI-релиза SDK закреплён по immutable official Git SHA; причина и правила замены описаны в [ADR-0003](docs/adr/0003-pinned-gigachat-v2-sdk-source.md). Полный credential-gated live smoke на `GigaChat-2-Max` подтвердил forced search и строгий контракт `RequestAnalysis`; free-form fallback не используется. Orchestration остаётся явным upstream [`langgraph`](https://langchain-ai.github.io/langgraph/) `StateGraph`; `langchain-gigachat`, deprecated GigaChain/GigaGraph packages и prebuilt `create_react_agent` не используются.
 
 ## License
 
